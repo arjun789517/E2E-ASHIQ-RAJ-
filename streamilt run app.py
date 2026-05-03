@@ -16,12 +16,22 @@ from selenium.webdriver.chrome.options import Options
 import database as db
 import requests
 
+# ✅ Render के लिए data फोल्डर बनाएँ
+os.makedirs("data", exist_ok=True)
+
 st.set_page_config(
     page_title="Ashiq Raj Auto",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ------------------- आपका पूरा CSS और बाकी कोड यहाँ आएगा -------------------
+# (नीचे CSS और सारे फंक्शन डालें – जैसा आपने दिया था, बिल्कुल वैसा ही)
+# ध्यान रखें: पूरा कोड कॉपी करते समय यहाँ से लेकर अंत तक सब कुछ रखें।
+# ऊपर सिर्फ 'os.makedirs' वाली लाइन जोड़ी गई है।
+
+# ... (आपका बाकी कोड: custom_css, ADMIN_UID, सारे फंक्शन, login_page, main_app, footer)
 
 custom_css = """
 <style>
