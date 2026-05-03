@@ -1,292 +1,206 @@
 import sqlite3
 import hashlib
-from pathlib import Path
-from cryptography.fernet import Fernet
-import json
+import os
+from datetime import datetime, timedelta
 
-# Database and encryption key paths
-DB_DIR = Path(__file__).parent
-DB_PATH = DB_DIR / 'users.db'
-ENCRYPTION_KEY_FILE = DB_DIR / '.encryption_key'
+DB_PATH = "data/users.db"
 
-def get_encryption_key():
-    if ENCRYPTION_KEY_FILE.exists():
-        with open(ENCRYPTION_KEY_FILE, 'rb') as f:
-            return f.read()
-    else:
-        key = Fernet.generate_key()
-        with open(ENCRYPTION_KEY_FILE, 'wb') as f:
-            f.write(key)
-        return key
-
-ENCRYPTION_KEY = get_encryption_key()
-cipher_suite = Fernet(ENCRYPTION_KEY)
-
-# Helper functions for password and cookies
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def encrypt_cookies(cookies: str) -> str:
-    if not cookies:
-        return None
-    return cipher_suite.encrypt(cookies.encode()).decode()
-
-def decrypt_cookies(encrypted_cookies: str) -> str:
-    if not encrypted_cookies:
-        return ""
-    try:
-        return cipher_suite.decrypt(encrypted_cookies.encode()).decode()
-    except:
-        return ""
-
-# Database initialization – creates all tables
-def init_db():
+def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    conn.row_factory = sqlite3.Row
+    return conn
 
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
     # Users table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
+            password TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-
-    # User configs table (includes lock columns)
+    
+    # User config table
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_configs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            chat_id TEXT,
-            name_prefix TEXT,
-            delay INTEGER DEFAULT 30,
-            cookies_encrypted TEXT,
-            messages TEXT,
-            automation_running INTEGER DEFAULT 0,
-            locked_group_name TEXT,
-            locked_nicknames TEXT,
-            lock_enabled INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    ''')
-
-    # Admin E2EE thread table (required by app.py)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS admin_e2ee (
+        CREATE TABLE IF NOT EXISTS user_config (
             user_id INTEGER PRIMARY KEY,
-            e2ee_thread_id TEXT,
-            cookies TEXT,
-            chat_type TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id)
+            chat_id TEXT DEFAULT '',
+            name_prefix TEXT DEFAULT '',
+            delay INTEGER DEFAULT 5,
+            cookies TEXT DEFAULT '',
+            messages TEXT DEFAULT 'Hello!\\nHow are you?',
+            automation_running INTEGER DEFAULT 0,
+            admin_e2ee_thread_id TEXT DEFAULT '',
+            admin_e2ee_chat_type TEXT DEFAULT 'REGULAR',
+            FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
         )
     ''')
-
-    # Add missing columns for existing databases (safety upgrades)
-    for col in ['automation_running', 'locked_group_name', 'locked_nicknames', 'lock_enabled']:
-        try:
-            cursor.execute(f'ALTER TABLE user_configs ADD COLUMN {col} TEXT')
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass
-
-    # Create default admin user: ASHIQRAJ / ASHIQRAJ123
-    admin_username = "ASHIQRAJ"
-    admin_password = "ASHIQRAJ123"
-    cursor.execute("SELECT id FROM users WHERE username = ?", (admin_username,))
-    if not cursor.fetchone():
-        pwd_hash = hash_password(admin_password)
-        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                       (admin_username, pwd_hash))
-        admin_id = cursor.lastrowid
-        cursor.execute('''
-            INSERT INTO user_configs (user_id, chat_id, name_prefix, delay, messages)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (admin_id, '', '', 30, ''))
-        conn.commit()
-
+    
+    # Sessions table for active users
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
-# ------------------- User management -------------------
-def create_user(username: str, password: str):
-    conn = sqlite3.connect(DB_PATH)
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def create_user(username, password):
+    init_db()
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        pwd_hash = hash_password(password)
-        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                       (username, pwd_hash))
+        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", 
+                       (username, hash_password(password)))
         user_id = cursor.lastrowid
-        cursor.execute('''
-            INSERT INTO user_configs (user_id, chat_id, name_prefix, delay, messages)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, '', '', 30, ''))
+        cursor.execute("INSERT INTO user_config (user_id) VALUES (?)", (user_id,))
         conn.commit()
         return True, "Account created successfully!"
     except sqlite3.IntegrityError:
         return False, "Username already exists!"
-    except Exception as e:
-        return False, f"Error: {str(e)}"
     finally:
         conn.close()
 
-def verify_user(username: str, password: str):
-    conn = sqlite3.connect(DB_PATH)
+def verify_user(username, password):
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,))
+    cursor.execute("SELECT id FROM users WHERE username = ? AND password = ?", 
+                   (username, hash_password(password)))
     row = cursor.fetchone()
     conn.close()
-    if row and row[1] == hash_password(password):
-        return row[0]
-    return None
+    return row['id'] if row else None
 
-def get_username(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+def get_username(user_id):
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT username FROM users WHERE id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
-    return row[0] if row else None
+    return row['username'] if row else None
 
-# ------------------- Config management -------------------
-def get_user_config(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+def get_user_config(user_id):
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT chat_id, name_prefix, delay, cookies_encrypted, messages, automation_running
-        FROM user_configs WHERE user_id = ?
-    ''', (user_id,))
+    cursor.execute("SELECT * FROM user_config WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
         return {
-            'chat_id': row[0] or '',
-            'name_prefix': row[1] or '',
-            'delay': row[2] or 30,
-            'cookies': decrypt_cookies(row[3]),
-            'messages': row[4] or '',
-            'automation_running': row[5] or 0
+            'chat_id': row['chat_id'],
+            'name_prefix': row['name_prefix'],
+            'delay': row['delay'],
+            'cookies': row['cookies'],
+            'messages': row['messages']
         }
     return None
 
-def update_user_config(user_id: int, chat_id: str, name_prefix: str, delay: int, cookies: str, messages: str):
-    conn = sqlite3.connect(DB_PATH)
+def update_user_config(user_id, chat_id, name_prefix, delay, cookies, messages):
+    conn = get_db_connection()
     cursor = conn.cursor()
-    enc_cookies = encrypt_cookies(cookies)
     cursor.execute('''
-        UPDATE user_configs
-        SET chat_id = ?, name_prefix = ?, delay = ?, cookies_encrypted = ?,
-            messages = ?, updated_at = CURRENT_TIMESTAMP
+        UPDATE user_config 
+        SET chat_id = ?, name_prefix = ?, delay = ?, cookies = ?, messages = ?
         WHERE user_id = ?
-    ''', (chat_id, name_prefix, delay, enc_cookies, messages, user_id))
+    ''', (chat_id, name_prefix, delay, cookies, messages, user_id))
     conn.commit()
     conn.close()
 
-# ------------------- Automation state -------------------
-def set_automation_running(user_id: int, is_running: bool):
-    conn = sqlite3.connect(DB_PATH)
+def set_automation_running(user_id, running):
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        UPDATE user_configs
-        SET automation_running = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = ?
-    ''', (1 if is_running else 0, user_id))
+    cursor.execute("UPDATE user_config SET automation_running = ? WHERE user_id = ?", 
+                   (1 if running else 0, user_id))
     conn.commit()
     conn.close()
 
-def get_automation_running(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+def get_automation_running(user_id):
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT automation_running FROM user_configs WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT automation_running FROM user_config WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
-    return bool(row[0]) if row else False
+    return bool(row['automation_running']) if row else False
 
-# ------------------- Lock system -------------------
-def get_lock_config(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+def get_admin_e2ee_thread_id(user_id):
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT chat_id, locked_group_name, locked_nicknames, lock_enabled, cookies_encrypted
-        FROM user_configs WHERE user_id = ?
-    ''', (user_id,))
+    cursor.execute("SELECT admin_e2ee_thread_id, admin_e2ee_chat_type FROM user_config WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
-    if row:
-        try:
-            nicknames = json.loads(row[2]) if row[2] else {}
-        except:
-            nicknames = {}
-        return {
-            'chat_id': row[0] or '',
-            'locked_group_name': row[1] or '',
-            'locked_nicknames': nicknames,
-            'lock_enabled': bool(row[3]),
-            'cookies': decrypt_cookies(row[4])
-        }
+    if row and row['admin_e2ee_thread_id']:
+        thread_id = row['admin_e2ee_thread_id']
+        chat_type = row['admin_e2ee_chat_type'] or 'REGULAR'
+        if chat_type == 'E2EE' and '/e2ee/' not in thread_id:
+            return thread_id  # just the ID
+        return thread_id
     return None
 
-def update_lock_config(user_id: int, chat_id: str, locked_group_name: str, locked_nicknames: dict, cookies=None):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    nicknames_json = json.dumps(locked_nicknames)
-    if cookies is not None:
-        enc_cookies = encrypt_cookies(cookies)
-        cursor.execute('''
-            UPDATE user_configs
-            SET chat_id = ?, locked_group_name = ?, locked_nicknames = ?,
-                cookies_encrypted = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = ?
-        ''', (chat_id, locked_group_name, nicknames_json, enc_cookies, user_id))
-    else:
-        cursor.execute('''
-            UPDATE user_configs
-            SET chat_id = ?, locked_group_name = ?, locked_nicknames = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = ?
-        ''', (chat_id, locked_group_name, nicknames_json, user_id))
-    conn.commit()
-    conn.close()
-
-def set_lock_enabled(user_id: int, enabled: bool):
-    conn = sqlite3.connect(DB_PATH)
+def set_admin_e2ee_thread_id(user_id, thread_id, cookies, chat_type='REGULAR'):
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        UPDATE user_configs
-        SET lock_enabled = ?, updated_at = CURRENT_TIMESTAMP
+        UPDATE user_config 
+        SET admin_e2ee_thread_id = ?, admin_e2ee_chat_type = ?, cookies = ?
         WHERE user_id = ?
-    ''', (1 if enabled else 0, user_id))
+    ''', (thread_id, chat_type, cookies, user_id))
     conn.commit()
     conn.close()
 
-def get_lock_enabled(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+# --- Session Management ---
+def update_user_session(session_id, user_id):
+    """Insert or update session activity."""
+    init_db()
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT lock_enabled FROM user_configs WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return bool(row[0]) if row else False
-
-# ------------------- Admin E2EE functions -------------------
-def get_admin_e2ee_thread_id(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT e2ee_thread_id FROM admin_e2ee WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-def set_admin_e2ee_thread_id(user_id: int, thread_id: str, cookies: str, chat_type: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    now = datetime.now().isoformat()
     cursor.execute('''
-        INSERT OR REPLACE INTO admin_e2ee (user_id, e2ee_thread_id, cookies, chat_type)
+        INSERT INTO user_sessions (session_id, user_id, last_active, created_at)
         VALUES (?, ?, ?, ?)
-    ''', (user_id, thread_id, cookies, chat_type))
+        ON CONFLICT(session_id) DO UPDATE SET last_active = ?
+    ''', (session_id, user_id, now, now, now))
     conn.commit()
     conn.close()
 
-# Initialize database on module load
+def remove_user_session(session_id):
+    """Delete session on logout."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_sessions WHERE session_id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+    # Also clean old sessions
+    cleanup_old_sessions()
+
+def cleanup_old_sessions():
+    """Remove sessions older than 5 minutes."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    expire_time = datetime.now() - timedelta(minutes=5)
+    cursor.execute("DELETE FROM user_sessions WHERE last_active < ?", (expire_time.isoformat(),))
+    conn.commit()
+    conn.close()
+
+def get_active_user_count():
+    """Get number of unique users with recent activity (last 5 minutes)."""
+    cleanup_old_sessions()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_sessions")
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+# Initialize DB when module loads
 init_db()
