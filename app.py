@@ -15,6 +15,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
 import database as db
 import requests
+from datetime import datetime, timedelta
 
 # ✅ Render के लिए data फोल्डर बनाएँ
 os.makedirs("data", exist_ok=True)
@@ -26,13 +27,21 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ------------------- आपका पूरा CSS और बाकी कोड यहाँ आएगा -------------------
-# (नीचे CSS और सारे फंक्शन डालें – जैसा आपने दिया था, बिल्कुल वैसा ही)
-# ध्यान रखें: पूरा कोड कॉपी करते समय यहाँ से लेकर अंत तक सब कुछ रखें।
-# ऊपर सिर्फ 'os.makedirs' वाली लाइन जोड़ी गई है।
+# ------------------- APP START TIME (UPTIME) -------------------
+START_TIME = time.time()
 
-# ... (आपका बाकी कोड: custom_css, ADMIN_UID, सारे फंक्शन, login_page, main_app, footer)
+# ------------------- SESSION TRACKING ID -------------------
+if 'session_id' not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
 
+# ------------------- AUTO-REFRESH META TAG (LIVE CONSOLE) -------------------
+def inject_auto_refresh(interval_seconds=10):
+    """Add meta refresh tag to auto-reload the page every 'interval' seconds."""
+    if st.session_state.get('logged_in', False):
+        meta_refresh = f'<meta http-equiv="refresh" content="{interval_seconds}">'
+        st.markdown(meta_refresh, unsafe_allow_html=True)
+
+# ------------------- CUSTOM CSS (Same as yours) -------------------
 custom_css = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700;800&display=swap');
@@ -1003,6 +1012,12 @@ def stop_automation(user_id):
     st.session_state.automation_state.running = False
     db.set_automation_running(user_id, False)
 
+def format_uptime(seconds):
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
 def login_page():
     st.markdown("""
     <div class="main-header">
@@ -1025,6 +1040,9 @@ def login_page():
                     st.session_state.logged_in = True
                     st.session_state.user_id = user_id
                     st.session_state.username = username
+                    
+                    # Track session in database
+                    db.update_user_session(st.session_state.session_id, user_id)
                     
                     should_auto_start = db.get_automation_running(user_id)
                     if should_auto_start:
@@ -1059,6 +1077,13 @@ def login_page():
                 st.warning("⚠️ PLEASE FILL ALL FIELDS")
 
 def main_app():
+    # Inject auto-refresh every 10 seconds for live console
+    inject_auto_refresh(interval_seconds=10)
+    
+    # Update session activity on every page load
+    if st.session_state.logged_in:
+        db.update_user_session(st.session_state.session_id, st.session_state.user_id)
+    
     st.markdown("""
     <div class="main-header">
         <h1>🔥 ASHIQ RAJ 🔥</h1>
@@ -1077,12 +1102,21 @@ def main_app():
     st.sidebar.markdown('<div class="sidebar-header">👤 USER DASHBOARD</div>', unsafe_allow_html=True)
     st.sidebar.markdown(f"**USERNAME:** {st.session_state.username}")
     st.sidebar.markdown(f"**USER ID:** {st.session_state.user_id}")
+    
+    # --- Uptime & Active Users Display ---
+    uptime_seconds = time.time() - START_TIME
+    uptime_str = format_uptime(uptime_seconds)
+    active_users = db.get_active_user_count()
+    
+    st.sidebar.markdown(f"**⏱️ UPTIME:** {uptime_str}")
+    st.sidebar.markdown(f"**👥 ACTIVE USERS:** {active_users}")
     st.sidebar.markdown('<div class="success-box">✅ PREMIUM ACCESS</div>', unsafe_allow_html=True)
     
     if st.sidebar.button("🚪 LOGOUT", use_container_width=True):
         if st.session_state.automation_state.running:
             stop_automation(st.session_state.user_id)
-        
+        # Remove session from database
+        db.remove_user_session(st.session_state.session_id)
         st.session_state.logged_in = False
         st.session_state.user_id = None
         st.session_state.username = None
@@ -1181,21 +1215,22 @@ def main_app():
                     st.warning("⚠️ AUTOMATION STOPPED!")
                     st.rerun()
             
+            # Live Console Output (auto-refreshes every 10s due to meta refresh)
             if st.session_state.automation_state.logs:
                 st.markdown("### 📡 LIVE CONSOLE OUTPUT")
                 
                 logs_html = '<div class="console-output">'
-                for log in st.session_state.automation_state.logs[-30:]:
+                for log in st.session_state.automation_state.logs[-30:]:  # last 30 lines
                     logs_html += f'<div class="console-line">{log}</div>'
                 logs_html += '</div>'
                 
                 st.markdown(logs_html, unsafe_allow_html=True)
-                
-                if st.button("🔄 REFRESH LOGS", use_container_width=True):
-                    st.rerun()
+            else:
+                st.info("No logs yet. Start automation to see console output.")
     else:
         st.warning("⚠️ NO CONFIGURATION FOUND. PLEASE REFRESH THE PAGE!")
 
+# ------------------- MAIN -------------------
 if not st.session_state.logged_in:
     login_page()
 else:
