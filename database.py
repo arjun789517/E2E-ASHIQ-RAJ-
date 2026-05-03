@@ -1,40 +1,153 @@
 import sqlite3
 import hashlib
-from pathlib import Path
-from cryptography.fernet import Fernet
 import os
+from pathlib import Path
 
-DB_PATH = Path(__file__).parent / 'users.db'
-ENCRYPTION_KEY_FILE = Path(__file__).parent / '.encryption_key'
+DB_DIR = Path(__file__).parent / "data"
+DB_DIR.mkdir(exist_ok=True)
+DB_PATH = DB_DIR / "automation.db"
 
-def get_encryption_key():
-    """Get or create encryption key for cookie storage"""
-    if ENCRYPTION_KEY_FILE.exists():
-        with open(ENCRYPTION_KEY_FILE, 'rb') as f:
-            return f.read()
-    else:
-        key = Fernet.generate_key()
-        with open(ENCRYPTION_KEY_FILE, 'wb') as f:
-            f.write(key)
-        return key
+def get_db_connection():
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
 
-ENCRYPTION_KEY = get_encryption_key()
-cipher_suite = Fernet(ENCRYPTION_KEY)
+def hash_password(password: str) -> str:
+    salt = b"asiq_raj_salt"
+    return hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000).hex()
 
 def init_db():
-    """Initialize database with tables"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
+    with get_db_connection() as conn:
+        # users table
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL
+            )
+        ''')
+        # user_config table
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_config (
+                user_id INTEGER PRIMARY KEY,
+                chat_id TEXT DEFAULT '',
+                name_prefix TEXT DEFAULT '',
+                delay INTEGER DEFAULT 10,
+                cookies TEXT DEFAULT '',
+                messages TEXT DEFAULT 'Hello!\nHow are you?\nNice to meet you!',
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+        # automation state
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS automation_state (
+                user_id INTEGER PRIMARY KEY,
+                is_running INTEGER DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+        # admin e2ee thread per user
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS admin_e2ee (
+                user_id INTEGER PRIMARY KEY,
+                e2ee_thread_id TEXT,
+                cookies TEXT,
+                chat_type TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+        conn.commit()
+        
+        # Create default admin user: ASHIQRAJ / ASHIQRAJ123
+        admin_exists = conn.execute("SELECT id FROM users WHERE username = 'ASHIQRAJ'").fetchone()
+        if not admin_exists:
+            pwd_hash = hash_password("ASHIQRAJ123")
+            conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ("ASHIQRAJ", pwd_hash))
+            conn.commit()
+            # get admin id
+            admin_id = conn.execute("SELECT id FROM users WHERE username = 'ASHIQRAJ'").fetchone()[0]
+            # create default config for admin
+            conn.execute("INSERT OR IGNORE INTO user_config (user_id) VALUES (?)", (admin_id,))
+            conn.execute("INSERT OR IGNORE INTO automation_state (user_id, is_running) VALUES (?, 0)", (admin_id,))
+            conn.commit()
+
+def verify_user(username, password):
+    init_db()
+    pwd_hash = hash_password(password)
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (username, pwd_hash)).fetchone()
+        return row['id'] if row else None
+
+def create_user(username, password):
+    init_db()
+    pwd_hash = hash_password(password)
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, pwd_hash))
+            user_id = cursor.lastrowid
+            conn.execute("INSERT INTO user_config (user_id) VALUES (?)", (user_id,))
+            conn.execute("INSERT INTO automation_state (user_id, is_running) VALUES (?, 0)", (user_id,))
+            conn.commit()
+        return True, "Account created successfully!"
+    except sqlite3.IntegrityError:
+        return False, "Username already exists!"
+
+def get_user_config(user_id):
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT chat_id, name_prefix, delay, cookies, messages FROM user_config WHERE user_id = ?", (user_id,)).fetchone()
+        if row:
+            return {
+                'chat_id': row['chat_id'] or '',
+                'name_prefix': row['name_prefix'] or '',
+                'delay': row['delay'] or 10,
+                'cookies': row['cookies'] or '',
+                'messages': row['messages'] or 'Hello!\nHow are you?\nNice to meet you!'
+            }
+        return None
+
+def update_user_config(user_id, chat_id, name_prefix, delay, cookies, messages):
+    init_db()
+    with get_db_connection() as conn:
+        conn.execute('''
+            UPDATE user_config
+            SET chat_id = ?, name_prefix = ?, delay = ?, cookies = ?, messages = ?
+            WHERE user_id = ?
+        ''', (chat_id, name_prefix, delay, cookies, messages, user_id))
+        conn.commit()
+
+def set_automation_running(user_id, is_running):
+    init_db()
+    with get_db_connection() as conn:
+        conn.execute("UPDATE automation_state SET is_running = ? WHERE user_id = ?", (1 if is_running else 0, user_id))
+        conn.commit()
+
+def get_automation_running(user_id):
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT is_running FROM automation_state WHERE user_id = ?", (user_id,)).fetchone()
+        return bool(row['is_running']) if row else False
+
+def get_username(user_id):
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
+        return row['username'] if row else None
+
+def get_admin_e2ee_thread_id(user_id):
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT e2ee_thread_id FROM admin_e2ee WHERE user_id = ?", (user_id,)).fetchone()
+        return row['e2ee_thread_id'] if row else None
+
+def set_admin_e2ee_thread_id(user_id, thread_id, cookies, chat_type):
+    init_db()
+    with get_db_connection() as conn:
+        conn.execute('''
+            INSERT OR REPLACE INTO admin_e2ee (user_id, e2ee_thread_id, cookies, chat_type)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, thread_id, cookies, chat_type))
+        conn.commit()    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_configs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
