@@ -1,3 +1,2 @@
-streamlit
-selenium
-requests
+streamlit==1.28.1
+selenium==4.15.2
