@@ -1,0 +1,217 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: 'Poppins', sans-serif;
+}
+
+body {
+    background: #0a0f1e;
+    color: #e0e0e0;
+    padding: 20px;
+}
+
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    background: rgba(20, 25, 40, 0.95);
+    border-radius: 25px;
+    border: 2px solid #4aa8ff;
+    box-shadow: 0 0 20px rgba(74, 168, 255, 0.2);
+    overflow: hidden;
+}
+
+.main-header {
+    background: linear-gradient(135deg, #ff6b9d 0%, #ff1493 100%);
+    padding: 2rem;
+    text-align: center;
+    border-bottom: 3px solid #4aa8ff;
+}
+
+.main-header h1 { color: white; font-size: 2.5rem; }
+.main-header p { color: #ffe6f2; font-size: 1.2rem; }
+
+.sidebar {
+    width: 260px;
+    float: left;
+    background: #0f1422;
+    padding: 20px;
+    border-right: 2px solid #4aa8ff;
+    min-height: 500px;
+}
+
+.main-content {
+    margin-left: 260px;
+    padding: 20px;
+}
+
+.sidebar-header {
+    background: linear-gradient(135deg, #ff6b9d, #ff1493);
+    padding: 1rem;
+    border-radius: 12px;
+    text-align: center;
+    margin-bottom: 1.5rem;
+    font-weight: bold;
+}
+
+.premium-badge {
+    background: #00c853;
+    color: white;
+    padding: 0.5rem;
+    border-radius: 10px;
+    text-align: center;
+    margin: 1rem 0;
+}
+
+.logout {
+    background: #ff4444;
+    color: white;
+    border: none;
+    padding: 0.8rem;
+    border-radius: 12px;
+    width: 100%;
+    cursor: pointer;
+    font-weight: bold;
+    margin-top: 1rem;
+}
+
+.tabs {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.tab-btn {
+    background: #1e243b;
+    border: 1px solid #4aa8ff;
+    color: #4aa8ff;
+    padding: 0.8rem 1.5rem;
+    border-radius: 12px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: 0.3s;
+}
+
+.tab-btn.active {
+    background: #4aa8ff;
+    color: #0a0f1e;
+}
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+.two-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+
+label {
+    display: block;
+    margin: 10px 0 5px;
+    color: #4aa8ff;
+    font-weight: bold;
+}
+
+input, textarea {
+    width: 100%;
+    padding: 10px;
+    background: #1a1f2e;
+    border: 1px solid #4aa8ff;
+    border-radius: 8px;
+    color: white;
+}
+
+button {
+    background: linear-gradient(135deg, #ff6b9d, #ff1493);
+    color: white;
+    border: none;
+    padding: 0.8rem 2rem;
+    border-radius: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: 0.3s;
+}
+
+button:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(255,20,147,0.4); }
+
+.metrics {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.metric-card {
+    background: #0f1422;
+    border: 1px solid #4aa8ff;
+    border-radius: 15px;
+    padding: 1rem;
+    text-align: center;
+    flex: 1;
+}
+
+.metric-value {
+    font-size: 2rem;
+    font-weight: bold;
+    color: #4aa8ff;
+}
+
+.action-buttons {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.console-section {
+    background: #0a0f1e;
+    border: 2px solid #4aa8ff;
+    border-radius: 15px;
+    padding: 15px;
+}
+
+.console-header {
+    font-weight: bold;
+    margin-bottom: 10px;
+    color: #4aa8ff;
+}
+
+.console-output {
+    background: #000000;
+    border-radius: 10px;
+    padding: 15px;
+    max-height: 400px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 13px;
+    color: #00ff88;
+}
+
+.console-line {
+    border-left: 3px solid #ff1493;
+    padding-left: 20px;
+    margin-bottom: 6px;
+    position: relative;
+}
+
+.console-line::before {
+    content: "►";
+    position: absolute;
+    left: 4px;
+    color: #ff1493;
+}
+
+.footer {
+    text-align: center;
+    padding: 1.5rem;
+    color: #4aa8ff;
+    border-top: 1px solid #4aa8ff;
+    margin-top: 20px;
+    background: #0f1422;
+}
+
+@media (max-width: 800px) {
+    .sidebar { width: 100%; float: none; border-right: none; border-bottom: 2px solid #4aa8ff; }
+    .main-content { margin-left: 0; }
+    .two-columns { grid-template-columns: 1fr; }
+}
