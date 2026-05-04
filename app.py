@@ -1,14 +1,17 @@
+# app.py
 import streamlit as st
 import time
 import threading
 import uuid
+import sqlite3
+import hashlib
 import os
 from pathlib import Path
+from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
-import database as db
-from datetime import datetime
+from selenium.webdriver.chrome.service import Service
 
 # ========== PAGE CONFIG ==========
 st.set_page_config(
@@ -23,12 +26,148 @@ START_TIME = time.time()
 if 'session_id' not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
-# ========== AUTO REFRESH (LIVE CONSOLE) ==========
+# ========== DATABASE SETUP (SQLite) ==========
+DB_FILE = "users.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    # Users table
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE,
+        password TEXT,
+        created_at TEXT
+    )''')
+    # User config table
+    c.execute('''CREATE TABLE IF NOT EXISTS user_config (
+        user_id INTEGER PRIMARY KEY,
+        chat_id TEXT DEFAULT '',
+        name_prefix TEXT DEFAULT '',
+        delay INTEGER DEFAULT 10,
+        cookies TEXT DEFAULT '',
+        messages TEXT DEFAULT 'Hello!'
+    )''')
+    # Automation state
+    c.execute('''CREATE TABLE IF NOT EXISTS automation_state (
+        user_id INTEGER PRIMARY KEY,
+        running INTEGER DEFAULT 0
+    )''')
+    # Active sessions
+    c.execute('''CREATE TABLE IF NOT EXISTS active_sessions (
+        session_id TEXT PRIMARY KEY,
+        user_id INTEGER,
+        last_seen TEXT
+    )''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def hash_password(pwd):
+    return hashlib.sha256(pwd.encode()).hexdigest()
+
+def create_user(username, password):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO users (username, password, created_at) VALUES (?, ?, ?)",
+                  (username, hash_password(password), datetime.now().isoformat()))
+        user_id = c.lastrowid
+        # Create default config
+        c.execute("INSERT INTO user_config (user_id) VALUES (?)", (user_id,))
+        c.execute("INSERT INTO automation_state (user_id, running) VALUES (?, 0)", (user_id,))
+        conn.commit()
+        return True, "Account created"
+    except sqlite3.IntegrityError:
+        return False, "Username already exists"
+    finally:
+        conn.close()
+
+def verify_user(username, password):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE username=? AND password=?", (username, hash_password(password)))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def get_username(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT username FROM users WHERE id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def get_user_config(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT chat_id, name_prefix, delay, cookies, messages FROM user_config WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {
+            'chat_id': row[0] or '',
+            'name_prefix': row[1] or '',
+            'delay': row[2] or 10,
+            'cookies': row[3] or '',
+            'messages': row[4] or 'Hello!'
+        }
+    return None
+
+def update_user_config(user_id, chat_id, name_prefix, delay, cookies, messages):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE user_config SET chat_id=?, name_prefix=?, delay=?, cookies=?, messages=? WHERE user_id=?",
+              (chat_id, name_prefix, delay, cookies, messages, user_id))
+    conn.commit()
+    conn.close()
+
+def get_automation_running(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT running FROM automation_state WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
+
+def set_automation_running(user_id, running):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE automation_state SET running=? WHERE user_id=?", (1 if running else 0, user_id))
+    conn.commit()
+    conn.close()
+
+def update_user_session(session_id, user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("REPLACE INTO active_sessions (session_id, user_id, last_seen) VALUES (?, ?, ?)",
+              (session_id, user_id, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def remove_user_session(session_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM active_sessions WHERE session_id=?", (session_id,))
+    conn.commit()
+    conn.close()
+
+def get_active_user_count():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(DISTINCT user_id) FROM active_sessions WHERE last_seen > datetime('now', '-5 minutes')")
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+# ========== AUTO REFRESH ==========
 def inject_auto_refresh(interval=10):
     if st.session_state.get('logged_in', False):
         st.markdown(f'<meta http-equiv="refresh" content="{interval}">', unsafe_allow_html=True)
 
-# ========== CUSTOM CSS (simplified but same look) ==========
+# ========== CUSTOM CSS ==========
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700;800&display=swap');
@@ -41,12 +180,11 @@ st.markdown("""
     .console-line { margin-bottom: 5px; border-left: 3px solid #ff1493; padding-left: 25px; position: relative; }
     .console-line::before { content: '►'; position: absolute; left: 5px; color: #ff1493; }
     .footer { text-align: center; padding: 1.5rem; color: #ff1493; margin-top: 2rem; }
-    .metric-container { background: rgba(255,255,255,0.9); padding: 15px; border-radius: 15px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ========== GLOBALS ==========
-ADMIN_UID = "100003995292301"   # Change to your Facebook ID
+ADMIN_UID = "100003995292301"   # Replace with your Facebook ID
 
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
@@ -83,26 +221,18 @@ def setup_browser(state=None):
     chrome_options.add_argument('--window-size=1920,1080')
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
     
-    # Try common Chrome/Chromium paths on Render
-    possible_paths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/usr/bin/chrome']
+    # Chromium path on Render (after setup.sh)
+    possible_paths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome']
     for p in possible_paths:
         if Path(p).exists():
             chrome_options.binary_location = p
             log_message(f"Using Chrome at {p}", state)
             break
     
-    from selenium.webdriver.chrome.service import Service
-    driver_paths = ['/usr/bin/chromedriver', '/usr/local/bin/chromedriver']
-    for dp in driver_paths:
-        if Path(dp).exists():
-            service = Service(executable_path=dp)
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-            log_message("Chrome started with chromedriver", state)
-            return driver
-    
-    # Fallback
-    driver = webdriver.Chrome(options=chrome_options)
-    log_message("Chrome started with default driver", state)
+    # Use system chromedriver (installed via setup.sh)
+    service = Service('/usr/bin/chromedriver')
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    log_message("Chrome started successfully", state)
     return driver
 
 def find_message_input(driver, process_id, state=None):
@@ -155,7 +285,7 @@ def send_messages(config, state, user_id, process_id="AUTO-1"):
         if not msg_input:
             log_message(f"{process_id}: Message input not found!", state)
             state.running = False
-            db.set_automation_running(user_id, False)
+            set_automation_running(user_id, False)
             return 0
         
         messages_list = [m.strip() for m in config['messages'].split('\n') if m.strip()]
@@ -207,7 +337,7 @@ def send_messages(config, state, user_id, process_id="AUTO-1"):
     except Exception as e:
         log_message(f"{process_id}: ERROR - {str(e)[:200]}", state)
         state.running = False
-        db.set_automation_running(user_id, False)
+        set_automation_running(user_id, False)
         return 0
     finally:
         if driver:
@@ -230,10 +360,8 @@ def send_admin_notification(user_config, username, state, user_id):
                     except:
                         pass
         
-        # Open admin conversation (direct UID)
         driver.get(f'https://www.facebook.com/messages/t/{ADMIN_UID}')
         time.sleep(8)
-        
         msg_input = find_message_input(driver, "ADMIN", state)
         if msg_input:
             note = f"🔘 Ashiq Raj - User Started Automation\n\n👤 {username}\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -263,17 +391,15 @@ def start_automation(user_config, user_id):
     state.running = True
     state.message_count = 0
     state.logs = []
-    db.set_automation_running(user_id, True)
-    username = db.get_username(user_id)
+    set_automation_running(user_id, True)
+    username = get_username(user_id)
     
-    # Send notification in background (does not block)
     threading.Thread(target=send_admin_notification, args=(user_config, username, state, user_id), daemon=True).start()
-    # Start main automation
     threading.Thread(target=send_messages, args=(user_config, state, user_id), daemon=True).start()
 
 def stop_automation(user_id):
     st.session_state.automation_state.running = False
-    db.set_automation_running(user_id, False)
+    set_automation_running(user_id, False)
 
 def format_uptime(seconds):
     return f"{int(seconds//3600):02d}:{int((seconds%3600)//60):02d}:{int(seconds%60):02d}"
@@ -286,15 +412,14 @@ def login_page():
         password = st.text_input("PASSWORD", type="password")
         if st.button("LOGIN", use_container_width=True):
             if username and password:
-                uid = db.verify_user(username, password)
+                uid = verify_user(username, password)
                 if uid:
                     st.session_state.logged_in = True
                     st.session_state.user_id = uid
                     st.session_state.username = username
-                    db.update_user_session(st.session_state.session_id, uid)
-                    # Auto-start if was running
-                    if db.get_automation_running(uid):
-                        cfg = db.get_user_config(uid)
+                    update_user_session(st.session_state.session_id, uid)
+                    if get_automation_running(uid):
+                        cfg = get_user_config(uid)
                         if cfg and cfg['chat_id']:
                             start_automation(cfg, uid)
                     st.rerun()
@@ -308,7 +433,7 @@ def login_page():
         confirm = st.text_input("Confirm Password", type="password")
         if st.button("CREATE ACCOUNT", use_container_width=True):
             if new_user and new_pass and new_pass == confirm:
-                ok, msg = db.create_user(new_user, new_pass)
+                ok, msg = create_user(new_user, new_pass)
                 if ok:
                     st.success(msg + " Please login.")
                 else:
@@ -319,23 +444,22 @@ def login_page():
 def main_app():
     inject_auto_refresh(10)
     if st.session_state.logged_in:
-        db.update_user_session(st.session_state.session_id, st.session_state.user_id)
+        update_user_session(st.session_state.session_id, st.session_state.user_id)
     
     st.markdown('<div class="main-header"><h1>🔥 ASHIQ RAJ 🔥</h1><p>PREMIUM FACEBOOK MESSAGE AUTOMATION TOOL</p></div>', unsafe_allow_html=True)
     
-    # Sidebar
     st.sidebar.markdown("### 👤 USER DASHBOARD")
     st.sidebar.write(f"**User:** {st.session_state.username}")
     st.sidebar.write(f"**Uptime:** {format_uptime(time.time()-START_TIME)}")
-    st.sidebar.write(f"**Active Users:** {db.get_active_user_count()}")
+    st.sidebar.write(f"**Active Users:** {get_active_user_count()}")
     if st.sidebar.button("🚪 LOGOUT", use_container_width=True):
         if st.session_state.automation_state.running:
             stop_automation(st.session_state.user_id)
-        db.remove_user_session(st.session_state.session_id)
+        remove_user_session(st.session_state.session_id)
         st.session_state.clear()
         st.rerun()
     
-    user_config = db.get_user_config(st.session_state.user_id)
+    user_config = get_user_config(st.session_state.user_id)
     if not user_config:
         st.warning("No configuration found. Please refresh.")
         return
@@ -349,7 +473,7 @@ def main_app():
         messages = st.text_area("Messages (one per line)", value=user_config['messages'], height=200)
         if st.button("💾 SAVE CONFIG", use_container_width=True):
             final_cookies = cookies if cookies.strip() else user_config['cookies']
-            db.update_user_config(st.session_state.user_id, chat_id, name_prefix, delay, final_cookies, messages)
+            update_user_config(st.session_state.user_id, chat_id, name_prefix, delay, final_cookies, messages)
             st.success("Saved! Reloading...")
             st.rerun()
     
@@ -370,7 +494,6 @@ def main_app():
             stop_automation(st.session_state.user_id)
             st.rerun()
         
-        # Live console
         if st.session_state.automation_state.logs:
             st.markdown("### 📡 LIVE CONSOLE")
             html = '<div class="console-output">'
@@ -381,10 +504,10 @@ def main_app():
         else:
             st.info("No logs yet. Start automation to see output.")
 
-# ========== RUN ==========
-if not st.session_state.get('logged_in', False):
-    login_page()
-else:
-    main_app()
-
-st.markdown('<div class="footer">MADE WITH ❤️ BY ASHIQ RAJ | © 2025</div>', unsafe_allow_html=True)
+if __name__ == "__main__":
+    if not st.session_state.get('logged_in', False):
+        login_page()
+    else:
+        main_app()
+    
+    st.markdown('<div class="footer">MADE WITH ❤️ BY ASHIQ RAJ | © 2025</div>', unsafe_allow_html=True)
