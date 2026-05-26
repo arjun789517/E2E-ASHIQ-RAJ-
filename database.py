@@ -3,9 +3,18 @@ import hashlib
 from pathlib import Path
 from cryptography.fernet import Fernet
 import os
+import json
 
-DB_PATH = Path(__file__).parent / 'users.db'
-ENCRYPTION_KEY_FILE = Path(__file__).parent / '.encryption_key'
+# Render Persistence Setup - Create data directory if it doesn't exist
+# This handles both local development and Render deployment
+DATA_DIR = Path('/opt/render/project/data') if os.environ.get('RENDER') else Path(__file__).parent
+
+# Ensure data directory exists on Render
+if os.environ.get('RENDER'):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_PATH = DATA_DIR / 'users.db'
+ENCRYPTION_KEY_FILE = DATA_DIR / '.encryption_key'
 
 def get_encryption_key():
     """Get or create encryption key for cookie storage"""
@@ -14,8 +23,13 @@ def get_encryption_key():
             return f.read()
     else:
         key = Fernet.generate_key()
-        with open(ENCRYPTION_KEY_FILE, 'wb') as f:
-            f.write(key)
+        try:
+            with open(ENCRYPTION_KEY_FILE, 'wb') as f:
+                f.write(key)
+        except Exception as e:
+            print(f"Warning: Could not save encryption key: {e}")
+            # Fallback to a deterministic key if we can't save
+            key = Fernet.generate_key()
         return key
 
 ENCRYPTION_KEY = get_encryption_key()
@@ -23,63 +37,62 @@ cipher_suite = Fernet(ENCRYPTION_KEY)
 
 def init_db():
     """Initialize database with tables"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_configs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            chat_id TEXT,
-            name_prefix TEXT,
-            delay INTEGER DEFAULT 30,
-            cookies_encrypted TEXT,
-            messages TEXT,
-            automation_running INTEGER DEFAULT 0,
-            locked_group_name TEXT,
-            locked_nicknames TEXT,
-            lock_enabled INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    ''')
-    
     try:
-        cursor.execute('ALTER TABLE user_configs ADD COLUMN automation_running INTEGER DEFAULT 0')
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Users table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # User configs table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                chat_id TEXT,
+                name_prefix TEXT,
+                delay INTEGER DEFAULT 30,
+                cookies_encrypted TEXT,
+                messages TEXT,
+                automation_running INTEGER DEFAULT 0,
+                locked_group_name TEXT,
+                locked_nicknames TEXT,
+                lock_enabled INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+        
+        # Add missing columns if they don't exist (for backward compatibility)
+        columns_to_add = [
+            ('automation_running', 'INTEGER DEFAULT 0'),
+            ('locked_group_name', 'TEXT'),
+            ('locked_nicknames', 'TEXT'),
+            ('lock_enabled', 'INTEGER DEFAULT 0')
+        ]
+        
+        for col_name, col_type in columns_to_add:
+            try:
+                cursor.execute(f'ALTER TABLE user_configs ADD COLUMN {col_name} {col_type}')
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        
         conn.commit()
-    except sqlite3.OperationalError:
-        pass
-    
-    try:
-        cursor.execute('ALTER TABLE user_configs ADD COLUMN locked_group_name TEXT')
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
-    
-    try:
-        cursor.execute('ALTER TABLE user_configs ADD COLUMN locked_nicknames TEXT')
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
-    
-    try:
-        cursor.execute('ALTER TABLE user_configs ADD COLUMN lock_enabled INTEGER DEFAULT 0')
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
-    
-    conn.commit()
-    conn.close()
+        conn.close()
+        print(f"Database initialized successfully at {DB_PATH}")
+        return True
+    except Exception as e:
+        print(f"Database initialization error: {e}")
+        return False
 
 def hash_password(password):
     """Hash password using SHA-256"""
@@ -97,7 +110,8 @@ def decrypt_cookies(encrypted_cookies):
         return ""
     try:
         return cipher_suite.decrypt(encrypted_cookies.encode()).decode()
-    except:
+    except Exception as e:
+        print(f"Decryption error: {e}")
         return ""
 
 def create_user(username, password):
@@ -127,7 +141,7 @@ def create_user(username, password):
         return False, f"Error: {str(e)}"
 
 def verify_user(username, password):
-    """Verify user credentials using SHA-256"""
+    """Verify user credentials"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -230,7 +244,6 @@ def get_lock_config(user_id):
     conn.close()
     
     if config:
-        import json
         try:
             nicknames = json.loads(config[2]) if config[2] else {}
         except:
@@ -247,7 +260,6 @@ def get_lock_config(user_id):
 
 def update_lock_config(user_id, chat_id, locked_group_name, locked_nicknames, cookies=None):
     """Update complete lock configuration including chat_id and cookies"""
-    import json
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -296,4 +308,5 @@ def get_lock_enabled(user_id):
     
     return bool(result[0]) if result else False
 
+# Initialize database when module loads
 init_db()
